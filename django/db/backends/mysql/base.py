@@ -6,9 +6,16 @@ Requires MySQLdb: http://sourceforge.net/projects/mysql-python
 from __future__ import unicode_literals
 
 import datetime
+import json
 import re
 import sys
 import warnings
+
+try:
+    import boto3
+except ImportError as e:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured("Error loading boto module: %s" % e)
 
 try:
     import MySQLdb as Database
@@ -405,20 +412,40 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         self.introspection = DatabaseIntrospection(self)
         self.validation = DatabaseValidation(self)
 
+    # This method returns the latest password and user stored in the secret
+    def get_most_recent_credentials(self):
+        try:
+            settings_dict = self.settings_dict
+            secret_name = settings_dict['SSM']
+            if not secret_name:
+                raise Exception('SSM key not found in settings')
+
+            session = boto3.session.Session()
+            client = session.client(
+                service_name='secretsmanager',
+            )
+            secrets = client.get_secret_value(SecretId=secret_name)
+            user = json.loads(secrets['SecretString'])['username']
+            password = json.loads(secrets['SecretString'])['password']
+        except Exception as e:
+            raise Exception('Failed to retrieve credentials from Secrets Manager', e)
+
+        return {'USER': user, 'PASSWORD': password}
+
+
     def get_connection_params(self):
+        credentials = self.get_most_recent_credentials()
         kwargs = {
-            'conv': django_conversions,
-            'charset': 'utf8',
+            "conv": django_conversions,
+            "charset": "utf8",
+            "user": credentials["USER"],
+            "passwd": credentials["PASSWORD"],
         }
         if six.PY2:
             kwargs['use_unicode'] = True
         settings_dict = self.settings_dict
-        if settings_dict['USER']:
-            kwargs['user'] = settings_dict['USER']
         if settings_dict['NAME']:
             kwargs['db'] = settings_dict['NAME']
-        if settings_dict['PASSWORD']:
-            kwargs['passwd'] = force_str(settings_dict['PASSWORD'])
         if settings_dict['HOST'].startswith('/'):
             kwargs['unix_socket'] = settings_dict['HOST']
         elif settings_dict['HOST']:
